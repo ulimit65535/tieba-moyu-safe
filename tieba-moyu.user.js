@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         百度贴吧优化摸鱼体验（本地安全评审版）
 // @namespace    tieba-moyu-script
-// @version      2.0.5.4
+// @version      2.0.5.5
 // @author       Moyu
 // @description  百度贴吧显示优化，功能增强，优雅的摸鱼
 // @license      MIT
@@ -110,7 +110,7 @@
             this.setting = { original: [], normal: {}, advanced: {} };
             this.modules = [];
             this.style = '';
-            this.version = '2.0.5.4';
+            this.version = '2.0.5.5';
         }
 
         getModule(name) {
@@ -1844,11 +1844,13 @@
             if (this._bars.length) return this._bars;
             const seen = new Set();
             const bars = [];
+            // 个人区域也会混入玩家认证等功能入口，不应作为贴吧工作表。
+            const serviceForums = new Set(['应用中心', '手游先锋', '玩家认证']);
             document.querySelectorAll('.e_myforum a[href], .my_tieba_mod a[href]').forEach(a => {
                 const href = this._forumHref(a.getAttribute('href'));
                 if (!href) return;
                 const kw = this._decodeForumKeyword(href, a.textContent);
-                if (seen.has(kw) || !kw || kw === '__home__') return;
+                if (seen.has(kw) || !kw || kw === '__home__' || serviceForums.has(kw.trim())) return;
                 seen.add(kw);
                 bars.push({ name: kw, kw, href });
             });

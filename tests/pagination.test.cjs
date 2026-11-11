@@ -152,6 +152,8 @@ test('工作表仅来自我的贴吧，排除导航推广和全页回退，保�
   const excel = x.script.getModule('ExcelMode');
   assert.equal(excel._collectBars().length, 0);
   x.w.document.body.insertAdjacentHTML('beforeend', `<div class="e_myforum">
+    <a href="/f?kw=玩家认证">手游0星达人</a>
+    <a href="/f?kw=应用中心">应用中心</a><a href="/f?kw=手游先锋">手游先锋</a>
     <a href="/f?fr=index&kw=明日方舟">明日方舟</a><a href="/f?kw=明日方舟">重复</a>
     <a href="https://evil.example/f?kw=伪造">伪造</a><a href="/f?kw=">空</a>
     <a href="/p/123?kw=帖子">帖子</a><a href="/f?kw=%CD%BC%C0%AD%B6%A1">图拉丁</a></div>`);
