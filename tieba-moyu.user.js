@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         百度贴吧优化摸鱼体验（本地安全评审版）
 // @namespace    tieba-moyu-script
-// @version      2.0.5.1
+// @version      2.0.5.2
 // @author       Moyu
 // @description  百度贴吧显示优化，功能增强，优雅的摸鱼
 // @license      MIT
@@ -26,13 +26,76 @@
             return Promise.reject(new Error('已阻止非贴吧同源请求'));
         }
         return fetch(url.href, {
-            method: 'GET', credentials: 'same-origin', mode: 'same-origin', redirect: 'error'
+            method: 'GET', credentials: 'same-origin', mode: 'same-origin', redirect: 'error', signal: AbortSignal.timeout(20000)
+        }).then(response => {
+            if (!response.ok) throw new Error(`贴吧请求失败：HTTP ${response.status}`);
+            return response;
         });
     }
 
     function numericPostId(value) {
         const id = String(value ?? '');
         return /^\d+$/.test(id) ? id : '';
+    }
+
+
+    // 贴吧总页数位于分页链接的兄弟节点 .l_reply_num，不能按本页的 30 条记录推算。
+    function postPageUrl(value, page) {
+        const url = new URL(value, location.href);
+        if (url.origin !== 'https://tieba.baidu.com' || !/^\/p\/\d+$/.test(url.pathname)) {
+            throw new Error('无效的贴吧帖子地址');
+        }
+        url.searchParams.set('pn', String(page));
+        url.searchParams.delete('pid');
+        url.hash = '';
+        return url.href;
+    }
+
+    function readPostPagination(doc, sourceUrl) {
+        const source = new URL(sourceUrl, location.href);
+        const selected = doc.querySelector('.l_pager .tP, .pb_list_pager .tP, .l_pager .current');
+        const currentPage = Math.max(1, parseInt(selected?.textContent, 10) || parseInt(source.searchParams.get('pn'), 10) || 1);
+        let totalPages = currentPage;
+        doc.querySelectorAll('.l_posts_num, .l_reply_num, .pb_list_pager, .l_pager').forEach(el => {
+            const match = el.textContent.replace(/,/g, '').match(/共\s*(\d+)\s*页/);
+            if (match) totalPages = Math.max(totalPages, Number(match[1]));
+        });
+        doc.querySelectorAll('input[max-page]').forEach(el => {
+            totalPages = Math.max(totalPages, parseInt(el.getAttribute('max-page'), 10) || 1);
+        });
+        doc.querySelectorAll('.pb_list_pager a[href], .l_pager a[href]').forEach(link => {
+            try {
+                const url = new URL(link.getAttribute('href'), source);
+                if (url.origin !== source.origin || url.pathname !== source.pathname) return;
+                totalPages = Math.max(totalPages, parseInt(url.searchParams.get('pn'), 10) || 1);
+            } catch {}
+        });
+        return { currentPage, totalPages, nextUrl: currentPage < totalPages ? postPageUrl(source.href, currentPage + 1) : null };
+    }
+
+    function findNextPageUrl(doc, sourceUrl) {
+        const source = new URL(sourceUrl, location.href);
+        if (/^\/p\/\d+$/.test(source.pathname)) return readPostPagination(doc, source.href).nextUrl;
+        const current = Number(source.searchParams.get('pn')) || 0;
+        const links = [];
+        doc.querySelectorAll('#frs_list_pager a[href], .pager a[href], a.j_pagebar_next[href]').forEach(link => {
+            try {
+                const url = new URL(link.getAttribute('href'), source);
+                const pn = Number(url.searchParams.get('pn'));
+                if (url.origin === source.origin && url.pathname === source.pathname && pn > current) links.push(url);
+            } catch {}
+        });
+        links.sort((a, b) => Number(a.searchParams.get('pn')) - Number(b.searchParams.get('pn')));
+        return links[0]?.href || null;
+    }
+
+    function postFloor(el, fallback) {
+        try {
+            const floor = Number(JSON.parse(el.getAttribute('data-field') || '{}').content?.post_no);
+            if (Number.isInteger(floor) && floor > 0) return floor;
+        } catch {}
+        const text = el.querySelector('.post-tail-wrap')?.textContent || '';
+        return Number(text.match(/(\d+)\s*楼/)?.[1]) || fallback;
     }
 
     const RENDER_FRAME_PARAM = '__tb_moyu_render';
@@ -47,7 +110,7 @@
             this.setting = { original: [], normal: {}, advanced: {} };
             this.modules = [];
             this.style = '';
-            this.version = '2.0.5';
+            this.version = '2.0.5.2';
         }
 
         getModule(name) {
@@ -404,7 +467,7 @@
             return Math.min(maximum, Math.max(minimum, parsed));
         }
 
-        saveSetting(msg = '保存成功，刷新页面生效') {
+        saveSetting(msg = '保存成功，自动翻页已立即生效；其他设置刷新后生效') {
             for (const k in this.setting.normal) {
                 const cb = document.getElementById('tb__cb_' + k);
                 if (cb) this.setting.normal[k] = cb.checked;
@@ -430,6 +493,9 @@
                 else this.setting.advanced[k] = el.value;
             }
             this.setValue('tb__advanced_setting', JSON.stringify(this.setting.advanced));
+            const autoPage = this.getModule('AutoPage');
+            autoPage?.stop();
+            if (this.isExcelManagedMode()) autoPage?.start(this);
             if (msg) this.popMsg(msg);
         }
 
@@ -543,7 +609,7 @@
             .tb__setting-item:last-child{border-bottom:none}
             .tb__setting-item label{flex:1;font-size:14px;color:#333;cursor:pointer;user-select:none}
             .tb__setting-item label small{display:block;font-size:12px;color:#999;margin-top:2px}
-            .tb__switch{position:relative;width:40px;height:22px;flex-shrink:0}
+            .tb__setting-item label.tb__switch{flex:0 0 40px;position:relative;width:40px;height:22px;flex-shrink:0}
             .tb__switch input{opacity:0;width:0;height:0}
             .tb__switch .tb__slider{position:absolute;inset:0;background:#ccc;border-radius:22px;cursor:pointer;transition:.3s}
             .tb__switch .tb__slider:before{content:"";position:absolute;height:16px;width:16px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.3s}
@@ -600,8 +666,12 @@
                 document.body.appendChild(cover);
                 cover.style.display = 'flex';
 
-                cover.querySelector('.tb__panel-close').addEventListener('click', () => cover.style.display = 'none');
-                cover.addEventListener('click', e => { if (e.target === cover) cover.style.display = 'none'; });
+                const closePanel = () => {
+                    cover.style.display = 'none';
+                    if (ctx.isExcelManagedMode()) ctx.getModule('AutoPage')?.start(ctx);
+                };
+                cover.querySelector('.tb__panel-close').addEventListener('click', closePanel);
+                cover.addEventListener('click', e => { if (e.target === cover) closePanel(); });
 
                 cover.querySelectorAll('.tb__panel-tab').forEach(tab => {
                     tab.addEventListener('click', () => {
@@ -695,7 +765,7 @@
                         normalHTML += `
                             <div class="tb__setting-item">
                                 <label for="tb__cb_${s.key}">${s.title || s.key}${s.desc ? `<small>${s.desc}</small>` : ''}</label>
-                                <div class="tb__switch"><input type="checkbox" id="tb__cb_${s.key}" ${checked}><span class="tb__slider"></span></div>
+                                <label class="tb__switch"><input type="checkbox" id="tb__cb_${s.key}" ${checked}><span class="tb__slider" aria-hidden="true"></span></label>
                             </div>`;
                     });
                     normalHTML += '</div>';
@@ -1802,13 +1872,15 @@
                 originalUrl: pageType === 'forms' ? this._safeHref(location.href) : ''
             };
 
+            if (pageType === 'forms') {
+                const page = readPostPagination(document, location.href);
+                Object.assign(this._sheetCache['__home__'], page, { baseUrl: location.href, startPage: page.currentPage });
+            }
+
             if (pageType === 'home') {
                 this._nextPageUrls['__home__'] = '__home_scroll__';
             } else {
-                const nextLink = document.querySelector('.pb_list_pager a.next, #frs_list_pager a.next, .l_pager .pager_next, .pager a.next, a.j_pagebar_next, a[href*="pn="]');
-                if (nextLink && nextLink.href && /pn=\d+/.test(nextLink.href)) {
-                    this._nextPageUrls['__home__'] = nextLink.href;
-                }
+                this._nextPageUrls['__home__'] = findNextPageUrl(document, location.href);
             }
 
             const isNotHome = pageType !== 'home';
@@ -1907,7 +1979,7 @@
                 });
             });
         },
-        _renderTable(overlay, rows, type) {
+        _renderTable(overlay, rows, type, observe = true) {
             const headerMap = {
                 threads: ['', '序号', '标题', '作者', '回复', '最后回复'],
                 forms: ['', '楼层', '作者', '内容', '时间'],
@@ -1930,7 +2002,7 @@
                 if (type === 'forms') {
                     const baseUrl = this._sheetCache[this._currentSheet]?.baseUrl || location.href.split('?')[0];
                     const currentPage = this._sheetCache[this._currentSheet]?.currentPage || 1;
-                    const totalPages = this._sheetCache[this._currentSheet]?.totalPages || Math.ceil(rows.length / 30);
+                    const totalPages = this._sheetCache[this._currentSheet]?.totalPages || 1;
 
                     pagination.innerHTML = `
                         <div class="tb__page-nav">
@@ -1973,6 +2045,8 @@
                 content.appendChild(pagination);
             }
 
+            if (observe) this._ctx.getModule('AutoPage')?.observeTable(this._ctx, overlay);
+
             const countEl = overlay.querySelector('#tb__row_count');
             if (countEl) countEl.textContent = `共 ${rows.length} 行`;
 
@@ -1989,7 +2063,7 @@
 
             try {
                 const cached = this._sheetCache[sheetKey];
-                if (!cached) return;
+                if (!cached) { this._loadingMore = false; return; }
 
                 const type = cached.type;
                 const newRows = [];
@@ -2194,16 +2268,11 @@
                     });
                 }
 
-                    const nextLink = doc.querySelector('.pb_list_pager a.next, #frs_list_pager a.next, .l_pager .pager_next, .pager a.next, a.j_pagebar_next, a[href*="pn="]');
-                    if (nextLink && nextLink.href && /pn=\d+/.test(nextLink.href)) {
-                        this._nextPageUrls[sheetKey] = nextLink.href.startsWith('http') ? nextLink.href : 'https://tieba.baidu.com' + nextLink.href;
-                    } else {
-                        delete this._nextPageUrls[sheetKey];
-                    }
+                    this._nextPageUrls[sheetKey] = findNextPageUrl(doc, nextUrl);
                 }
 
                 cached.rows.push(...newRows);
-                this._renderTable(overlay, cached.rows, cached.type);
+                if (this._currentSheet === sheetKey && this._sheetCache[sheetKey] === cached) this._renderTable(overlay, cached.rows, cached.type);
 
                 this._ctx.popNotification(`已加载 ${newRows.length} 行新数据`);
             } catch (e) {
@@ -2213,20 +2282,22 @@
             }
             this._loadingMore = false;
         },
-        async _loadPostPage(overlay, baseUrl, targetPage) {
+        async _loadPostPage(overlay, baseUrl, targetPage, append = false) {
             if (this._loadingMore) return;
             this._loadingMore = true;
 
             const ctx = this._ctx;
             const sheetKey = this._currentSheet;
             const cached = this._sheetCache[sheetKey];
-            if (!cached) return;
+            if (!cached) { this._loadingMore = false; return; }
 
             const content = overlay.querySelector('#tb__excel_content');
-            content.innerHTML = '<div style="text-align:center;padding:40px;color:#999;font-size:14px">加载第 ' + targetPage + ' 页...</div>';
+            const scrollTop = overlay.scrollTop;
+            this._ctx.getModule('AutoPage')?.disconnectTable();
+            if (!append) content.innerHTML = '<div style="text-align:center;padding:40px;color:#999;font-size:14px">加载第 ' + targetPage + ' 页...</div>';
 
             try {
-                const url = targetPage === 1 ? baseUrl : `${baseUrl}?pn=${targetPage}`;
+                const url = postPageUrl(baseUrl, targetPage);
                 const resp = await fetchTiebaPage(url);
                 const html = await resp.text();
                 const uncommented = html.replace(/<!--/g, '').replace(/-->/g, '');
@@ -2258,39 +2329,36 @@
                         postContent += ` <span class="tb__lzl-toggle" data-pid="${pid}" data-tid="${tid}" data-count="${commentNum}">▶ 展开回复(${commentNum})</span>`;
                     }
                     const tail = el.querySelector('.post-tail-wrap span, .p_tail, .acore_reply_tail')?.textContent?.trim() || '';
-                    const floorNum = (targetPage - 1) * 30 + i + 1;
+                    const floorNum = postFloor(el, (targetPage - 1) * 30 + i + 1);
                     rows.push([`${floorNum}楼`, author, this._htmlCell(postContent), tail]);
                 });
 
-                const pagerTextEl = doc.querySelector('.l_pager, .pb_list_pager');
-                let totalPages = cached.totalPages || 1;
-                if (pagerTextEl) {
-                    const match = pagerTextEl.textContent.match(/共\s*(\d+)\s*页/);
-                    if (match) {
-                        totalPages = parseInt(match[1]);
-                    }
-                }
-                if (totalPages === 1) totalPages = Math.max(1, Math.ceil(rows.length / 30));
-
-                const nextLink = doc.querySelector('.pb_list_pager a.next, .l_pager .pager_next, .pager a[href*="pn="]');
-                if (nextLink && nextLink.href && /pn=\d+/.test(nextLink.href)) {
-                    this._nextPageUrls[sheetKey] = nextLink.href.startsWith('http') ? nextLink.href : 'https://tieba.baidu.com' + nextLink.href;
-                } else {
-                    delete this._nextPageUrls[sheetKey];
-                }
+                if (!rows.length) throw new Error('页面没有有效楼层，可能需要登录或验证');
+                const page = readPostPagination(doc, url);
+                if (page.currentPage !== targetPage) throw new Error('贴吧未返回请求的页码');
+                if (this._sheetCache[sheetKey] !== cached) return;
+                this._nextPageUrls[sheetKey] = page.nextUrl;
+                const totalPages = page.totalPages;
+                if (append) rows.unshift(...cached.rows);
 
                 cached.rows = rows;
+                cached.startPage = append ? (cached.startPage || cached.currentPage || 1) : targetPage;
                 cached.currentPage = targetPage;
                 cached.totalPages = totalPages;
                 cached.baseUrl = baseUrl;
 
-                this._renderTable(overlay, rows, 'forms');
+                if (this._sheetCache[sheetKey] === cached && this._currentSheet === sheetKey && this._active) {
+                    this._renderTable(overlay, rows, 'forms');
+                    overlay.scrollTop = append ? scrollTop : 0;
+                }
                 ctx.popNotification(`已加载第 ${targetPage} 页`);
             } catch (e) {
                 console.error('Load page failed:', e);
-                ctx.popNotification('加载失败，请重试', 2000);
+                if (this._currentSheet === sheetKey) this._renderTable(overlay, cached.rows, 'forms', false);
+                ctx.popNotification('加载失败，请点击下一页重试', 2000);
+            } finally {
+                this._loadingMore = false;
             }
-            this._loadingMore = false;
         },
         async _openPost(href, title, overlay) {
             const ctx = this._ctx;
@@ -2393,30 +2461,21 @@
                         postContent += ` <span class="tb__lzl-toggle" data-pid="${pid}" data-tid="${tid}" data-count="${commentNum}">▶ 展开回复(${commentNum})</span>`;
                     }
                     const tail = el.querySelector('.post-tail-wrap span, .p_tail, .acore_reply_tail')?.textContent?.trim() || '';
-                    rows.push([`${i + 1}楼`, author, this._htmlCell(postContent), tail]);
+                    rows.push([`${postFloor(el, i + 1)}楼`, author, this._htmlCell(postContent), tail]);
                 });
 
-                const nextLink = doc.querySelector('.pb_list_pager a.next, .l_pager .pager_next, .pager a[href*="pn="]');
-                if (nextLink && nextLink.href && /pn=\d+/.test(nextLink.href)) {
-                    this._nextPageUrls[postKey] = nextLink.href.startsWith('http') ? nextLink.href : 'https://tieba.baidu.com' + nextLink.href;
-                }
-
-                const pagerTextEl = doc.querySelector('.l_pager, .pb_list_pager');
-                let totalPages = 1;
-                if (pagerTextEl) {
-                    const match = pagerTextEl.textContent.match(/共\s*(\d+)\s*页/);
-                    if (match) {
-                        totalPages = parseInt(match[1]);
-                    }
-                }
-                if (totalPages === 1) totalPages = Math.max(1, Math.ceil(rows.length / 30));
+                if (!rows.length) throw new Error('页面没有有效楼层，可能需要登录或验证');
+                const page = readPostPagination(doc, originalUrl);
+                this._nextPageUrls[postKey] = page.nextUrl;
+                const { currentPage, totalPages } = page;
 
                 this._sheetCache[postKey] = {
                     rows,
                     type: 'forms',
-                    baseUrl: originalUrl.split('?')[0],
+                    baseUrl: originalUrl,
                     originalUrl,
-                    currentPage: 1,
+                    currentPage,
+                    startPage: currentPage,
                     totalPages
                 };
                 postTab.classList.remove('tb__sheet-loading');
@@ -2467,10 +2526,7 @@
                 const doc = parser.parseFromString(uncommented, 'text/html');
                 let { rows, imageCount } = this._collectThreadRows(doc);
 
-                const nextLink = doc.querySelector('.pb_list_pager a.next, #frs_list_pager a.next, .l_pager .pager_next');
-                if (nextLink && nextLink.href) {
-                    this._nextPageUrls[sheetKey] = nextLink.href.startsWith('http') ? nextLink.href : 'https://tieba.baidu.com' + nextLink.href;
-                }
+                this._nextPageUrls[sheetKey] = findNextPageUrl(doc, url);
 
                 this._sheetCache[sheetKey] = { rows, type: 'threads' };
                 if (this._currentSheet === sheetKey) {
@@ -2741,7 +2797,7 @@
                         content += ` <span class="tb__lzl-toggle" data-pid="${pid}" data-tid="${tid}" data-count="${commentNum}">▶ 展开回复(${commentNum})</span>`;
                     }
                     const tail = el.querySelector('.post-tail-wrap span, .p_tail, .acore_reply_tail')?.textContent?.trim() || '';
-                    rows.push([`${i + 1}楼`, author, this._htmlCell(content), tail]);
+                    rows.push([`${postFloor(el, i + 1)}楼`, author, this._htmlCell(content), tail]);
                 });
             }
 
@@ -3046,108 +3102,43 @@
         name: 'AutoPage',
         title: '自动翻页',
         setting: { key: 'autoPage', title: '自动翻页', desc: '滚动到页面底部时自动加载下一页内容', default: false, group: '增强功能' },
-        _loading: false,
-        _finished: false,
-        _nextUrl: null,
         _observer: null,
         initFunc(ctx) {
             if (ctx.isExcelManagedMode()) this.start(ctx);
         },
-        /**
-         * 在 Excel 托管开启时启动自动翻页观察器。
-         * @param {TieBaScript} ctx 脚本运行上下文。
-         * @returns {void} 无返回值；功能关闭或已经启动时直接返回。
-         */
         start(ctx) {
-            if (!ctx.setting.normal.autoPage || this._observer || document.getElementById('tb__autopage_sentinel')) return;
-            const self = this;
-            this._finished = false;
-            this._nextUrl = null;
-
-            self._findNextUrl();
-
-            this._observer = new IntersectionObserver(entries => {
-                if (entries[0].isIntersecting && !self._loading && !self._finished) {
-                    self._loadNext(ctx);
-                }
-            }, { rootMargin: '300px' });
-
-            const sentinel = document.createElement('div');
-            sentinel.id = 'tb__autopage_sentinel';
-            sentinel.style.height = '1px';
-
-            const pager = document.querySelector('.pb_list_pager, #frs_list_pager, .l_pager');
-            if (pager) {
-                pager.parentElement.insertBefore(sentinel, pager.nextSibling);
-                this._observer.observe(sentinel);
-            } else {
-                this._observer.disconnect();
-                this._observer = null;
-            }
+            const overlay = document.getElementById('tb__excel_overlay');
+            if (overlay) this.observeTable(ctx, overlay);
         },
-        /**
-         * 停止自动翻页并清理托管期间创建的观察节点。
-         * @returns {void} 无返回值；用于关闭 `R` 时恢复贴吧原生页面。
-         */
-        stop() {
+        disconnectTable() {
             this._observer?.disconnect();
             this._observer = null;
+        },
+        stop() {
+            this.disconnectTable();
             document.getElementById('tb__autopage_sentinel')?.remove();
-            this._loading = false;
         },
-        _findNextUrl() {
-            const nextLink = document.querySelector('.pb_list_pager a.next, #frs_list_pager a.next, .l_pager .pager_theme_5:last-child');
-            if (nextLink) {
-                this._nextUrl = nextLink.href;
-            } else {
-                this._finished = true;
-            }
-        },
-        async _loadNext(ctx) {
-            if (!this._nextUrl) { this._finished = true; return; }
-            this._loading = true;
-            ctx.popNotification('加载下一页...');
-
-            try {
-                const resp = await fetchTiebaPage(this._nextUrl);
-                const html = await resp.text();
-                const uncommented = html.replace(/<!--/g, '').replace(/-->/g, '');
-                const parser = new DOMParser();
-                const doc = parser.parseFromString(uncommented, 'text/html');
-
-                if (ctx.isThreads()) {
-                    const newThreads = doc.querySelectorAll('.j_thread_list');
-                    const container = document.querySelector('#thread_list');
-                    if (container && newThreads.length) {
-                        newThreads.forEach(thread => {
-                            const imported = document.importNode(thread, true);
-                            imported.dataset.tbManagedAutopage = '1';
-                            container.appendChild(imported);
-                        });
-                    }
-                } else if (ctx.isForms()) {
-                    const newPosts = doc.querySelectorAll('.l_post.j_l_post');
-                    const container = document.querySelector('#j_p_postlist');
-                    if (container && newPosts.length) {
-                        newPosts.forEach(post => {
-                            const imported = document.importNode(post, true);
-                            imported.dataset.tbManagedAutopage = '1';
-                            container.appendChild(imported);
-                        });
-                    }
-                }
-
-                const nextLink = doc.querySelector('.pb_list_pager a.next, #frs_list_pager a.next');
-                if (nextLink) {
-                    this._nextUrl = new URL(nextLink.getAttribute('href'), location.origin).href;
+        observeTable(ctx, overlay) {
+            this.disconnectTable();
+            if (!ctx.setting.normal.autoPage || !ctx.isExcelManagedMode() || !overlay.classList.contains('active')) return;
+            const excel = ctx.getModule('ExcelMode');
+            const sheetKey = excel._currentSheet;
+            const cached = excel._sheetCache[sheetKey];
+            const pager = overlay.querySelector('.tb__pagination');
+            if (!cached || !pager || !excel._nextPageUrls[sheetKey]) return;
+            this._observer = new IntersectionObserver(entries => {
+                if (!entries.some(entry => entry.isIntersecting) || excel._loadingMore ||
+                    !ctx.setting.normal.autoPage || !ctx.isExcelManagedMode() ||
+                    excel._currentSheet !== sheetKey || excel._sheetCache[sheetKey] !== cached ||
+                    document.getElementById('tb__setting_cover')?.style.display === 'flex') return;
+                this.disconnectTable();
+                if (cached.type === 'forms') {
+                    excel._loadPostPage(overlay, cached.baseUrl, cached.currentPage + 1, true);
                 } else {
-                    this._finished = true;
+                    excel._loadMoreRows(overlay);
                 }
-            } catch (e) {
-                console.error('AutoPage load failed:', e);
-                ctx.popNotification('加载失败', 2000);
-            }
-            this._loading = false;
+            }, { root: overlay, rootMargin: '0px 0px 150px 0px' });
+            this._observer.observe(pager);
         }
     });
 
