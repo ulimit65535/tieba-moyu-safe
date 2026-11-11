@@ -145,3 +145,67 @@ test('滚动观察器只触发当前工作表的下一页，加载中不重复�
   assert.equal(observer.disconnected, true);
   x.w.close();
 });
+
+test('工作表仅来自我的贴吧，排除导航推广和全页回退，保留去重及旧编码', () => {
+  const x = setup(`<nav><a href="/f?kw=应用中心">应用中心</a><a href="/f?kw=手游先锋">手游先锋</a></nav>
+    <div class="sug_list"><a href="/f?kw=玩家认证">玩家认证</a></div>`, 'https://tieba.baidu.com/f?kw=测试');
+  const excel = x.script.getModule('ExcelMode');
+  assert.equal(excel._collectBars().length, 0);
+  x.w.document.body.insertAdjacentHTML('beforeend', `<div class="e_myforum">
+    <a href="/f?fr=index&kw=明日方舟">明日方舟</a><a href="/f?kw=明日方舟">重复</a>
+    <a href="https://evil.example/f?kw=伪造">伪造</a><a href="/f?kw=">空</a>
+    <a href="/p/123?kw=帖子">帖子</a><a href="/f?kw=%CD%BC%C0%AD%B6%A1">图拉丁</a></div>`);
+  assert.deepEqual(Array.from(excel._collectBars(), b => b.kw), ['明日方舟', '图拉丁']);
+  assert.ok(excel._bars[1].href.includes('%CD%BC%C0%AD%B6%A1'));
+  x.w.close();
+});
+const feedItem = (href = '/f?kw=%E5%9B%BE%E6%8B%89%E4%B8%81') => `<li class="j_feed_li"><span class="n_name"><a href="${href}">图拉丁吧</a></span><a href="/p/123">测试标题</a><div class="n_txt">摘要</div></li>`;
+test('首页来源渲染真实链接，点击不会被帖子处理器拦截', () => {
+  const x = setup(`<ul>${feedItem()}</ul><div id="tb__excel_overlay"><div id="tb__excel_content"></div></div>`, 'https://tieba.baidu.com/');
+  const excel = x.script.getModule('ExcelMode');
+  excel._ctx = x.script;
+  const rows = excel._collectData(x.script, 'home');
+  const overlay = x.w.document.getElementById('tb__excel_overlay');
+  excel._renderTable(overlay, rows, 'home', false);
+  excel._bindOverlayEvents(overlay);
+  const sourceLink = overlay.querySelector('td:nth-child(3) a');
+  assert.equal(new URL(sourceLink.href).searchParams.get('kw'), '图拉丁');
+  assert.equal(sourceLink.textContent, '图拉丁吧');
+  let openedPost = false;
+  excel._openPost = () => { openedPost = true; };
+  let intercepted;
+  overlay.addEventListener('click', event => { intercepted = event.defaultPrevented; event.preventDefault(); });
+  sourceLink.dispatchEvent(new x.w.MouseEvent('click', { bubbles: true, cancelable: true }));
+  assert.equal(intercepted, false);
+  assert.equal(openedPost, false);
+  overlay.querySelector('td:nth-child(4) a').click();
+  assert.equal(openedPost, true);
+  for (const href of ['javascript:alert(1)', 'https://evil.example/f?kw=图拉丁', '/p/123?kw=图拉丁', '/f?kw=']) {
+    const item = doc(x.w, feedItem(href)).querySelector('li');
+    assert.equal(excel._forumSourceCell(item), '图拉丁吧');
+  }
+  const legacy = doc(x.w, feedItem('/f?kw=%CD%BC%C0%AD%B6%A1')).querySelector('li');
+  assert.ok(excel._forumSourceCell(legacy).html.includes('%CD%BC%C0%AD%B6%A1'));
+  x.w.close();
+});
+test('首页滚动追加和请求下一页均保留可点击来源', async () => {
+  for (const mode of ['__home_scroll__', 'https://tieba.baidu.com/?pn=2']) {
+    const x = setup('<div id="tb__excel_overlay"><div id="tb__excel_content"></div></div>', 'https://tieba.baidu.com/');
+    const excel = x.script.getModule('ExcelMode');
+    excel._ctx = x.script;
+    excel._sheetCache.__home__ = { rows: [], type: 'home' };
+    excel._nextPageUrls.__home__ = mode;
+    x.script.popNotification = () => {};
+    if (mode === '__home_scroll__') {
+      x.w.scrollTo = () => x.w.document.body.insertAdjacentHTML('beforeend', `<ul>${feedItem()}</ul>`);
+      x.w.setTimeout = cb => { cb(); return 0; };
+    } else {
+      x.w.fetch = async () => ({ ok: true, text: async () => `<ul>${feedItem()}</ul>` });
+    }
+    await excel._loadMoreRows(x.w.document.getElementById('tb__excel_overlay'));
+    const link = x.w.document.querySelector('#tb__excel_content td:nth-child(3) a');
+    assert.ok(link, mode);
+    assert.equal(new URL(link.href).searchParams.get('kw'), '图拉丁');
+    x.w.close();
+  }
+});

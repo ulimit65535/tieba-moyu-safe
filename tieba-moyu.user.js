@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         百度贴吧优化摸鱼体验（本地安全评审版）
 // @namespace    tieba-moyu-script
-// @version      2.0.5.2
+// @version      2.0.5.4
 // @author       Moyu
 // @description  百度贴吧显示优化，功能增强，优雅的摸鱼
 // @license      MIT
@@ -110,7 +110,7 @@
             this.setting = { original: [], normal: {}, advanced: {} };
             this.modules = [];
             this.style = '';
-            this.version = '2.0.5.2';
+            this.version = '2.0.5.4';
         }
 
         getModule(name) {
@@ -275,6 +275,15 @@
             return this.getRuntimeBoolean('tb__rt_excelMode', this.setting.normal.excelMode);
         }
 
+        // excelMode 保留旧版布尔开关，disguiseMode 只保存上次选择的外观，供 R 键恢复。
+        getDisguiseMode() {
+            return this.setting.normal.disguiseMode === 'tencent' ? 'tencent' : 'excel';
+        }
+
+        getEffectiveDisguiseMode() {
+            return this.isExcelManagedMode() ? this.getDisguiseMode() : 'off';
+        }
+
         /**
          * 按 Excel 总开关同步会改变原生页面外观的样式类。
          * @param {boolean} active 是否由 Excel 模式接管页面展示。
@@ -362,7 +371,7 @@
          */
         canToggleManagedDisplay() {
             if (this.isExcelManagedMode()) return true;
-            this.popNotification('请先按 R 开启 Excel 模式');
+            this.popNotification('请先按 R 开启伪装模式');
             return false;
         }
 
@@ -467,10 +476,17 @@
             return Math.min(maximum, Math.max(minimum, parsed));
         }
 
-        saveSetting(msg = '保存成功，自动翻页已立即生效；其他设置刷新后生效') {
+        saveSetting(msg = '保存成功，伪装模式和自动翻页已立即生效；其他设置刷新后生效') {
             for (const k in this.setting.normal) {
                 const cb = document.getElementById('tb__cb_' + k);
-                if (cb) this.setting.normal[k] = cb.checked;
+                if (!cb) continue;
+                if (k === 'excelMode') {
+                    const mode = ['off', 'excel', 'tencent'].includes(cb.value) ? cb.value : 'off';
+                    this.setting.normal.excelMode = mode !== 'off';
+                    if (mode !== 'off') this.setting.normal.disguiseMode = mode;
+                } else {
+                    this.setting.normal[k] = cb.checked;
+                }
             }
             this.setValue('tb__setting', JSON.stringify(this.setting.normal));
             const runtimeKeys = {
@@ -495,6 +511,11 @@
             this.setValue('tb__advanced_setting', JSON.stringify(this.setting.advanced));
             const autoPage = this.getModule('AutoPage');
             autoPage?.stop();
+            const disguise = this.getModule('ExcelMode');
+            if (disguise?._ctx) {
+                disguise._active = this.isExcelManagedMode();
+                disguise._toggle(this);
+            }
             if (this.isExcelManagedMode()) autoPage?.start(this);
             if (msg) this.popMsg(msg);
         }
@@ -512,6 +533,7 @@
                     }
                     this.setting.normal = local;
                 }
+                this.setting.normal.disguiseMode = this.getDisguiseMode();
                 const a = this.getValue('tb__advanced_setting');
                 if (a) {
                     const localAdv = JSON.parse(a);
@@ -609,6 +631,7 @@
             .tb__setting-item:last-child{border-bottom:none}
             .tb__setting-item label{flex:1;font-size:14px;color:#333;cursor:pointer;user-select:none}
             .tb__setting-item label small{display:block;font-size:12px;color:#999;margin-top:2px}
+            .tb__setting-item select{padding:5px 8px;border:1px solid #d9d9d9;border-radius:6px;background:#fff;color:#333;font-size:13px}
             .tb__setting-item label.tb__switch{flex:0 0 40px;position:relative;width:40px;height:22px;flex-shrink:0}
             .tb__switch input{opacity:0;width:0;height:0}
             .tb__switch .tb__slider{position:absolute;inset:0;background:#ccc;border-radius:22px;cursor:pointer;transition:.3s}
@@ -658,7 +681,12 @@
 
             function openPanel() {
                 let cover = document.getElementById('tb__setting_cover');
-                if (cover) { cover.style.display = 'flex'; return; }
+                if (cover) {
+                    const mode = cover.querySelector('#tb__cb_excelMode');
+                    if (mode) mode.value = ctx.getEffectiveDisguiseMode();
+                    cover.style.display = 'flex';
+                    return;
+                }
 
                 cover = document.createElement('div');
                 cover.id = 'tb__setting_cover';
@@ -747,7 +775,7 @@
             }
 
             function buildPanelHTML(ctx) {
-                const normals = ctx.setting.original.filter(s => (s.type || 'normal') === 'normal');
+                const normals = ctx.setting.original.filter(s => (s.type || 'normal') === 'normal' && !s.hidden);
                 const advanceds = ctx.setting.original.filter(s => s.type === 'advanced');
 
                 const groups = {};
@@ -761,6 +789,14 @@
                 for (const [gname, items] of Object.entries(groups)) {
                     normalHTML += `<div class="tb__setting-group"><h4>${gname}</h4>`;
                     items.forEach(s => {
+                        if (s.options) {
+                            const value = s.key === 'excelMode' ? ctx.getEffectiveDisguiseMode() : ctx.setting.normal[s.key];
+                            normalHTML += `<div class="tb__setting-item">
+                                <label for="tb__cb_${s.key}">${s.title}<small>${s.desc || ''}</small></label>
+                                <select id="tb__cb_${s.key}">${s.options.map(o => `<option value="${o.value}" ${value === o.value ? 'selected' : ''}>${o.label}</option>`).join('')}</select>
+                            </div>`;
+                            return;
+                        }
                         const checked = ctx.getEffectiveNormalBoolean(s.key) ? 'checked' : '';
                         normalHTML += `
                             <div class="tb__setting-item">
@@ -814,7 +850,7 @@
                                 <p style="color:#999;font-size:14px">v${ctx.version}</p>
                                 <p style="color:#666;font-size:14px;margin-top:16px">参考 NGA优化摸鱼体验 脚本设计</p>
                                 <div style="margin-top:24px;font-size:13px;color:#999">
-                                    <p>快捷键: Q隐藏头像 | E隐藏图片 | R Excel模式 | D暗黑模式 | T回顶部 | B回底部</p>
+                                    <p>快捷键: Q隐藏头像 | E隐藏图片 | R伪装模式 | D暗黑模式 | T回顶部 | B回底部</p>
                                 </div>
                             </div>
                         </div>
@@ -1439,12 +1475,16 @@
     // =============================================
     script.addModule({
         name: 'ExcelMode',
-        title: 'Excel伪装模式',
-        setting: { key: 'excelMode', title: 'Excel伪装模式', desc: '将页面伪装为Excel表格 [快捷键 R]', default: false, group: '界面优化' },
+        title: '表格伪装模式',
+        setting: { key: 'excelMode', title: '伪装模式', desc: '保存后立即切换；R 键开关上次选择的模式', default: false, group: '界面优化', options: [
+            { value: 'off', label: '关闭' }, { value: 'excel', label: 'Excel' }, { value: 'tencent', label: '腾讯文档' }
+        ] },
+        settings: [{ key: 'disguiseMode', default: 'excel', hidden: true }],
         _active: false,
         style: `
             .tb__excel-overlay{position:fixed;inset:0;z-index:99999;background:#fff;overflow-y:auto;font-family:"Segoe UI",Tahoma,Geneva,Verdana,sans-serif;display:none}
             .tb__excel-overlay.active{display:block}
+            body.tb__excel-managed #tb__fixed_setting_btn{display:none!important}
             .tb__excel-toolbar{background:#217346;color:#fff;padding:4px 12px;display:flex;align-items:center;gap:16px;font-size:13px;position:sticky;top:0;z-index:1}
             .tb__excel-toolbar .tb__excel-logo{font-weight:bold;font-size:15px;margin-right:8px}
             .tb__excel-toolbar .tb__excel-menu{display:flex;gap:2px}
@@ -1504,19 +1544,166 @@
             body.tb__dark-mode .tb__page-btn:disabled{background:#21262d}
             body.tb__dark-mode .tb__page-info{color:#c9d1d9}
             body.tb__dark-mode .tb__page-input{background:#0d1117;border-color:#30363d;color:#c9d1d9}
+            .tb__disguise-chrome{position:sticky;top:0;z-index:3}
+            .tb__disguise-chrome .tb__excel-toolbar,.tb__disguise-chrome .tb__excel-ribbon{position:static}
+            .tb__column-letters{display:none}
+            .tb__excel-overlay{--tb-selection:#217346}
+            .tb__tencent{--tb-selection:#3370ff;font-family:Arial,"PingFang SC","Microsoft YaHei",sans-serif;background:#fff;color:#202124}
+            .tb__tencent .tb__disguise-chrome{height:102px;background:#f5f6f8;box-sizing:border-box;padding-bottom:6px}
+            .tb__qq-titlebar{height:54px;display:flex;align-items:center;gap:14px;padding:0 18px;font-size:14px;box-sizing:border-box}
+            .tb__qq-icon{width:18px;height:18px;display:inline-block;vertical-align:middle;flex-shrink:0;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+            .tb__qq-action{display:inline-flex;align-items:center;justify-content:center;gap:6px;border:0;background:transparent;color:inherit;padding:6px;border-radius:4px;font:inherit;white-space:nowrap;cursor:pointer;text-decoration:none}
+            .tb__qq-action:hover{background:#e8ebef}
+            .tb__qq-book{font-size:18px;font-weight:600;margin-right:2px;white-space:nowrap}
+            .tb__qq-muted{color:#8a8e96;font-size:12px;display:flex;align-items:center;gap:6px;white-space:nowrap}
+            .tb__qq-spacer{flex:1}
+            .tb__qq-share{background:#3370ff;color:#fff;padding:7px 18px}
+            .tb__qq-share:hover{background:#2863e8}
+            .tb__qq-avatar{width:28px;height:28px;border-radius:50%;background:#e0e8fb;display:flex;align-items:center;justify-content:center;color:#4877bf}
+            .tb__qq-ribbon{height:42px;margin:0 8px;display:flex;align-items:center;gap:4px;padding:0 10px;background:#fff;border:1px solid #dadce0;border-radius:7px;box-shadow:0 1px 3px #0000000c;font-size:13px;overflow-x:auto;scrollbar-width:none;box-sizing:border-box;white-space:nowrap}
+            .tb__qq-ribbon::-webkit-scrollbar{display:none}
+            .tb__qq-ribbon .tb__qq-action{height:30px;min-width:28px;padding:4px 7px;box-sizing:border-box}
+            .tb__qq-ribbon .tb__qq-disabled{color:#b7bac0}
+            .tb__qq-sep{width:1px;height:20px;background:#e5e6e9;flex-shrink:0;margin:0 5px}
+            .tb__qq-font{min-width:88px!important;justify-content:space-between}
+            .tb__qq-ribbon b{font-size:17px;font-weight:500}
+            .tb__qq-arrow{font-size:10px;margin-left:4px}
+            .tb__qq-color{font-size:18px;line-height:20px;border-bottom:3px solid currentColor}
+            .tb__tencent .tb__excel-formula{height:30px;padding:0 8px 4px;gap:4px;box-sizing:border-box;top:102px;background:#f5f6f8;border:0;z-index:3}
+            .tb__tencent .tb__formula-name,.tb__tencent .tb__formula-input{height:26px;box-sizing:border-box;border:1px solid #dadce0;border-radius:4px;background:#fff;color:#3c4043;padding:3px 8px;font-size:12px}
+            .tb__tencent .tb__formula-name{width:80px;text-align:left}
+            .tb__tencent #tb__excel_content{min-height:calc(100vh - 168px)}
+            .tb__tencent .tb__column-letters{display:table-row}
+            .tb__tencent .tb__column-letters th{height:24px;padding:0 8px;top:132px;z-index:2}
+            .tb__tencent .tb__excel-table th{background:#f5f6f8;border-color:#dfe1e5;color:#444;font-size:12px}
+            .tb__tencent .tb__excel-table td{border-color:#e0e2e6;color:#202124;padding:5px 8px}
+            .tb__tencent .tb__excel-table .tb__row-num{background:#f5f6f8;color:#5f6368;width:40px;min-width:40px}
+            .tb__tencent .tb__excel-table tr:hover td{background:#f3f7ff}
+            .tb__tencent .tb__excel-table td a{color:#202124!important;text-decoration:none}
+            .tb__tencent .tb__excel-table td a:hover{color:#3370ff!important;text-decoration:underline}
+            .tb__tencent .tb__excel-footer{height:36px;box-sizing:border-box;background:#fff;border-color:#e5e6e9;padding:0 12px;color:#444;gap:12px;z-index:3}
+            .tb__tencent .tb__sheet-tabs{align-items:stretch;height:36px}
+            .tb__tencent .tb__sheet-tab,.tb__tencent .tb__sheet-tab.tb__sheet-nav,.tb__tencent .tb__sheet-tab.tb__sheet-post{border:0;border-bottom:3px solid transparent;background:transparent;color:#444;border-radius:0;padding:5px 14px}
+            .tb__tencent .tb__sheet-tab.active,.tb__tencent .tb__sheet-tab.tb__sheet-post.active{border-bottom-color:#3370ff;background:#f0f3f9;color:#202124}
+            .tb__tencent .tb__sheet-tab:hover{background:#f0f3f9}
+            .tb__tencent .tb__load-more-btn{color:#3370ff}
+            .tb__tencent .tb__load-more-btn:hover{background:#3370ff;color:#fff}
+            .tb__qq-status{display:none}
+            .tb__tencent .tb__qq-status{display:inline-flex;gap:18px;align-items:center;margin-left:16px;white-space:nowrap}
+            body.tb__dark-mode .tb__tencent .tb__disguise-chrome,body.tb__dark-mode .tb__tencent .tb__excel-formula{background:#161b22!important}
+            body.tb__dark-mode .tb__tencent .tb__qq-ribbon{background:#21262d;border-color:#30363d}
+            body.tb__dark-mode .tb__tencent .tb__qq-action:hover{background:#30363d}
+            body.tb__dark-mode .tb__tencent .tb__sheet-tab.active{border-bottom-color:#5890ff!important}
+            @media(max-width:1000px){.tb__qq-muted{display:none}.tb__qq-titlebar{gap:6px;padding:0 10px}.tb__qq-status{display:none!important}}
         `,
         _sheetCache: {},
         _currentSheet: '__home__',
         _bars: [],
         _nextPageUrls: {},
         _loadingMore: false,
+        _icon(name) {
+            const paths = {
+                home: '<path d="m3 10 9-7 9 7v11h-7v-7h-4v7H3Z"/>',
+                plus: '<path d="M12 4v16M4 12h16"/>',
+                star: '<path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9Z"/>',
+                folder: '<path d="M3 6h7l2 3h9v12H3Z"/>',
+                check: '<circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/>',
+                menu: '<circle cx="12" cy="12" r="9"/><path d="M8 8h8M8 12h8M8 16h6"/>',
+                undo: '<path d="M8 5 3 10l5 5M3 10h11a6 6 0 0 1 0 12"/>',
+                redo: '<path d="m16 5 5 5-5 5M21 10H10a6 6 0 0 0 0 12"/>',
+                paint: '<path d="M4 3h16v7H4ZM12 10v4H8v7"/>',
+                eraser: '<path d="m14 3 7 7-10 11H6l-5-5ZM7 10l7 7M11 21h11"/>',
+                grid: '<path d="M3 3h18v18H3ZM3 10h18M10 3v18"/>',
+                fill: '<path d="m10 3 9 9-9 9-9-9ZM5 16h15M10 3V1M21 15s-4 4 0 4 0-4 0-4"/>',
+                align: '<path d="M3 5h18M3 10h12M3 15h18M3 20h12"/>',
+                valign: '<path d="M3 12h18M12 2v6m-3-3 3 3 3-3M12 22v-6m-3 3 3-3 3 3"/>',
+                wrap: '<path d="M3 5h18M3 10h13a4 4 0 0 1 0 8h-6m3-3-3 3 3 3M3 18h3"/>',
+                merge: '<path d="M3 3h18v18H3ZM3 12h7m-3-3 3 3-3 3M21 12h-7m3-3-3 3 3 3"/>',
+                filter: '<path d="M3 4h18l-7 8v8l-4-2v-6Z"/>',
+                sort: '<path d="M7 3v18m-4-4 4 4 4-4M15 5h6M15 11h4M15 17h2"/>',
+                search: '<circle cx="10" cy="10" r="7"/><path d="m15 15 6 6"/>',
+                chevron: '<path d="m5 9 7 7 7-7"/>',
+                user: '<circle cx="12" cy="7" r="4"/><path d="M3 22v-3a9 9 0 0 1 18 0v3Z"/>',
+                close: '<path d="m6 6 12 12M18 6 6 18"/>'
+            };
+            return `<svg class="tb__qq-icon" viewBox="0 0 24 24" aria-hidden="true">${paths[name] || paths.grid}</svg>`;
+        },
+        _buildTencentToolbar() {
+            const icon = name => this._icon(name);
+            const tool = (name, label, extra = '') => `<span class="tb__qq-action ${extra}" title="${label}" aria-hidden="true">${icon(name)}</span>`;
+            const sep = '<span class="tb__qq-sep"></span>';
+            return `<div class="tb__qq-titlebar">
+                <span title="腾讯文档">${icon('home')}</span><span>${icon('plus')}</span>${sep}
+                <span class="tb__qq-book">工作簿</span>${tool('star', '收藏')}${tool('folder', '移动')}
+                <span class="tb__qq-muted">${icon('check')}所有更改已保存</span><span class="tb__qq-spacer"></span>
+                <a id="tb__excel_origin" class="tb__qq-action" target="_blank" rel="noopener noreferrer" style="display:none" title="在新标签页打开贴吧原贴">↗ 打开原贴</a>
+                <button id="tb__excel_setting" class="tb__qq-action" title="打开摸鱼设置" aria-label="设置">☰</button>
+                <span class="tb__qq-action" aria-hidden="true">AI</span>${tool('user', '协作')}
+                <span class="tb__qq-action tb__qq-share" aria-hidden="true">分享</span>
+                <span class="tb__qq-avatar">${icon('user')}</span>
+                <button id="tb__excel_close" class="tb__qq-action" title="退出伪装模式" aria-label="退出伪装模式">${icon('close')}</button>
+            </div>
+            <div class="tb__qq-ribbon" aria-label="简约工具栏">
+                <span class="tb__qq-action">${icon('menu')} 菜单 <span class="tb__qq-arrow">▾</span></span>${sep}
+                ${tool('undo', '撤销', 'tb__qq-disabled')}${tool('redo', '重做', 'tb__qq-disabled')}${tool('paint', '格式刷')}${tool('eraser', '清除格式')}${sep}
+                <span class="tb__qq-action">${icon('plus')} 插入 <span class="tb__qq-arrow">▾</span></span>${sep}
+                <span class="tb__qq-action tb__qq-font">默认字体 <span class="tb__qq-arrow">▾</span></span>
+                <span class="tb__qq-action">10 <span class="tb__qq-arrow">▾</span></span>
+                <span class="tb__qq-action"><b>B</b><span class="tb__qq-arrow">▾</span></span>
+                <span class="tb__qq-action"><span class="tb__qq-color">A</span><span class="tb__qq-arrow">▾</span></span>
+                ${tool('fill', '填充颜色')}${tool('grid', '边框')}${sep}${tool('grid', '表格样式')}${tool('grid', '单元格样式')}${sep}
+                ${tool('align', '水平对齐')}${tool('valign', '垂直对齐')}${tool('sort', '文字方向')}${tool('wrap', '自动换行')}${tool('merge', '合并', 'tb__qq-disabled')}${sep}
+                <span class="tb__qq-action">常规 <span class="tb__qq-arrow">▾</span></span><span class="tb__qq-action">%</span><span class="tb__qq-action">.0</span>${sep}
+                ${tool('filter', '筛选数据')}${tool('grid', '冻结')}${tool('sort', '排序')}<span class="tb__qq-action">···</span><span class="tb__qq-spacer"></span>
+                ${tool('search', '查找替换')}<span class="tb__qq-action" title="简约工具栏">${icon('chevron')}</span>
+            </div>`;
+        },
+        _syncAppearance(overlay) {
+            const tencent = this._ctx.getDisguiseMode() === 'tencent';
+            overlay.classList.toggle('tb__tencent', tencent);
+            document.title = tencent ? '工作簿 - 腾讯文档' : 'Book1 - Excel Online';
+            const chrome = overlay.querySelector('.tb__disguise-chrome');
+            if (chrome && chrome.dataset.mode !== this._ctx.getDisguiseMode()) {
+                if (!this._excelToolbarHTML) this._excelToolbarHTML = chrome.innerHTML;
+                chrome.innerHTML = tencent ? this._buildTencentToolbar() : this._excelToolbarHTML;
+                chrome.dataset.mode = this._ctx.getDisguiseMode();
+                chrome.querySelector('#tb__excel_setting').addEventListener('click', () => this._ctx.openSettingPanel?.());
+                chrome.querySelector('#tb__excel_close').addEventListener('click', () => {
+                    this._active = false;
+                    this._ctx.setValue('tb__rt_excelMode', 'false');
+                    this._toggle(this._ctx);
+                });
+            }
+            this._syncOriginalPostLink(overlay, this._sheetCache[this._currentSheet]?.originalUrl);
+            this._syncDisguiseIcon(tencent);
+        },
+        _syncDisguiseIcon(tencent) {
+            if (!tencent) {
+                document.getElementById('tb__disguise_icon')?.remove();
+                if (this._origIcons) {
+                    this._origIcons.forEach(({ element, rel }) => element.setAttribute('rel', rel));
+                    this._origIcons = null;
+                }
+                return;
+            }
+            if (document.getElementById('tb__disguise_icon')) return;
+            this._origIcons = Array.from(document.querySelectorAll('link[rel~="icon"]'), element => ({ element, rel: element.getAttribute('rel') }));
+            this._origIcons.forEach(({ element }) => element.setAttribute('rel', 'tb-original-icon'));
+            const link = document.createElement('link');
+            link.id = 'tb__disguise_icon';
+            link.rel = 'icon';
+            link.href = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect x="3" y="2" width="26" height="28" rx="3" fill="#08b880"/><path d="M8 10h16v14H8zM8 15h16M8 20h16M14 10v14" fill="none" stroke="white" stroke-width="2"/></svg>');
+            document.head.appendChild(link);
+        },
         initFunc(ctx) {
             this._active = ctx.getRuntimeBoolean('tb__rt_excelMode', ctx.setting.normal.excelMode);
-            ctx.getModule('ShortCutKeys').register('R', 'Excel模式', () => {
+            this._ctx = ctx;
+            ctx.getModule('ShortCutKeys').register('R', '伪装模式', () => {
                 this._active = !this._active;
                 ctx.setValue('tb__rt_excelMode', this._active ? 'true' : 'false');
                 this._toggle(ctx);
-                ctx.popNotification(this._active ? 'Excel模式已开启' : 'Excel模式已关闭');
+                const name = ctx.getDisguiseMode() === 'tencent' ? '腾讯文档' : 'Excel';
+                ctx.popNotification(`${name}伪装模式已${this._active ? '开启' : '关闭'}`);
             });
         },
         postProcFunc(ctx) {
@@ -1643,32 +1830,53 @@
                 const cell = event.target.closest('td');
                 if (!cell || !content.contains(cell)) return;
                 content.querySelectorAll('.tb__excel-table td').forEach(item => { item.style.outline = ''; });
-                cell.style.outline = '2px solid #217346';
+                cell.style.outline = '2px solid var(--tb-selection)';
                 const formulaInput = overlay.querySelector('.tb__formula-input');
                 if (formulaInput) formulaInput.value = cell.textContent.slice(0, 200);
+                const name = overlay.querySelector('.tb__formula-name');
+                if (name && cell.cellIndex > 0) {
+                    name.textContent = `${String.fromCharCode(64 + cell.cellIndex)}${cell.parentElement.rowIndex - 1}`;
+                }
             });
         },
+        // 工作表只来自“我的贴吧”，不扫描全站导航、推广或推荐链接。
         _collectBars() {
             if (this._bars.length) return this._bars;
             const seen = new Set();
             const bars = [];
-            const addBar = (a) => {
-                const href = a.getAttribute('href') || a.href || '';
+            document.querySelectorAll('.e_myforum a[href], .my_tieba_mod a[href]').forEach(a => {
+                const href = this._forumHref(a.getAttribute('href'));
+                if (!href) return;
                 const kw = this._decodeForumKeyword(href, a.textContent);
-                if (seen.has(kw) || !kw) return;
+                if (seen.has(kw) || !kw || kw === '__home__') return;
                 seen.add(kw);
-                bars.push({ name: kw, kw, href: a.href });
-            };
-            document.querySelectorAll('.e_myforum a[href*="/f?kw="], .my_tieba_mod a[href*="/f?kw="], .sug_list a[href*="/f?kw="], .forum_table a[href*="/f?kw="]').forEach(addBar);
-            if (!bars.length) {
-                document.querySelectorAll('a[href*="/f?kw="]').forEach(a => {
-                    const txt = a.textContent.trim();
-                    if (!txt || /\d+\.?\d*[WwKk万千]/.test(txt)) return;
-                    addBar(a);
-                });
-            }
+                bars.push({ name: kw, kw, href });
+            });
             this._bars = bars.slice(0, 20);
             return this._bars;
+        },
+        _forumHref(value) {
+            if (!value) return '';
+            try {
+                const url = new URL(value, location.href);
+                return url.origin === 'https://tieba.baidu.com' && /^\/f\/?$/.test(url.pathname)
+                    && url.searchParams.get('kw')?.trim() ? url.href : '';
+            } catch {
+                return '';
+            }
+        },
+        // 首页初始行和两种追加路径共用同一来源单元格，保留原始吧链接（含 GBK 编码）。
+        _forumSourceCell(item) {
+            const nameNode = item.querySelector('.n_name, .feed-forum-link');
+            const links = Array.from(item.querySelectorAll('a[href]'));
+            const link = links.find(a => (a === nameNode || a.contains(nameNode) || nameNode?.contains(a))
+                && this._forumHref(a.getAttribute('href')))
+                || links.find(a => this._forumHref(a.getAttribute('href')));
+            const name = nameNode?.textContent?.trim() || link?.textContent?.trim() || '';
+            const href = link && this._forumHref(link.getAttribute('href'));
+            return href && name
+                ? this._htmlCell(`<a href="${this._escapeAttr(href)}">${this._escapeHtml(name)}</a>`)
+                : name;
         },
         /**
          * 解码贴吧链接中的吧名，兼容 UTF-8、旧 GBK 百分号编码和异常编码回退。
@@ -1843,11 +2051,19 @@
             let overlay = document.getElementById('tb__excel_overlay');
             if (!this._active) {
                 if (overlay) overlay.classList.remove('active');
-                document.title = this._origTitle || document.title;
+                if (this._origTitle !== undefined) document.title = this._origTitle;
+                this._syncDisguiseIcon(false);
                 return;
             }
-            this._origTitle = this._origTitle || document.title;
-            document.title = 'Book1 - Excel Online';
+            if (this._origTitle === undefined) this._origTitle = document.title;
+
+            // 只替换工具栏和外观，保留当前工作表、异步请求和阅读位置。
+            if (overlay?.querySelector('.tb__disguise-chrome') && this._sheetCache.__home__) {
+                overlay.classList.add('active');
+                this._syncAppearance(overlay);
+                ctx.getModule('AutoPage')?.observeTable(ctx, overlay);
+                return;
+            }
 
             if (!overlay) {
                 overlay = document.createElement('div');
@@ -1897,6 +2113,7 @@
             });
 
             overlay.innerHTML = `
+                <div class="tb__disguise-chrome">
                 <div class="tb__excel-toolbar">
                     <span class="tb__excel-logo">☰ Excel Online</span>
                     <div class="tb__excel-menu">
@@ -1904,7 +2121,7 @@
                     </div>
                     <a id="tb__excel_origin" target="_blank" rel="noopener noreferrer" style="margin-left:auto;color:inherit;text-decoration:none;display:none" title="在新标签页打开贴吧原贴">↗ 打开原贴</a>
                     <span style="cursor:pointer" id="tb__excel_setting" title="打开摸鱼设置">⚙ 设置</span>
-                    <span style="cursor:pointer" id="tb__excel_close" title="退出Excel模式">✕ 退出</span>
+                    <span style="cursor:pointer" id="tb__excel_close" title="退出伪装模式">✕ 退出</span>
                 </div>
                 <div class="tb__excel-ribbon">
                     <select><option>等线</option><option>宋体</option><option>微软雅黑</option></select>
@@ -1920,6 +2137,7 @@
                     <span class="tb__ribbon-btn">≡</span>
                     <span class="tb__ribbon-btn">⫶</span>
                 </div>
+                </div>
                 <div class="tb__excel-formula">
                     <div class="tb__formula-name">A1</div>
                     <input class="tb__formula-input" value="" readonly>
@@ -1927,22 +2145,13 @@
                 <div id="tb__excel_content"></div>
                 <div class="tb__excel-footer">
                     <div class="tb__sheet-tabs" id="tb__sheet_tabs">${barTabsHTML}</div>
-                    <span id="tb__row_count">共 ${rows.length} 行</span>
+                    <span><span id="tb__row_count">共 ${rows.length} 行</span><span class="tb__qq-status" aria-hidden="true">▦　⌄　│　⛶　 −　100%　＋</span></span>
                 </div>`;
 
+            this._syncAppearance(overlay);
             this._bindOverlayEvents(overlay);
             this._renderTable(overlay, rows, pageType);
             this._syncOriginalPostLink(overlay, this._sheetCache['__home__'].originalUrl);
-
-            overlay.querySelector('#tb__excel_setting').addEventListener('click', () => {
-                ctx.openSettingPanel?.();
-            });
-
-            overlay.querySelector('#tb__excel_close').addEventListener('click', () => {
-                this._active = false;
-                ctx.setValue('tb__rt_excelMode', 'false');
-                this._toggle(ctx);
-            });
 
             overlay.querySelectorAll('#tb__sheet_tabs .tb__sheet-tab').forEach(tab => {
                 if (tab.classList.contains('tb__sheet-nav')) {
@@ -1986,7 +2195,8 @@
                 home: ['', '序号', '来源', '标题', '摘要', '作者', '时间']
             };
             const colHeaders = headerMap[type] || headerMap.home;
-            let tableHTML = '<tr>' + colHeaders.map(h => `<th>${h}</th>`).join('') + '</tr>';
+            let tableHTML = '<tr class="tb__column-letters">' + colHeaders.map((_, i) => `<th>${i ? String.fromCharCode(64 + i) : '◢'}</th>`).join('') + '</tr>';
+            tableHTML += '<tr>' + colHeaders.map(h => `<th>${h}</th>`).join('') + '</tr>';
             rows.forEach((row, idx) => {
                 tableHTML += `<tr><td class="tb__row-num">${idx + 1}</td>${row.map(cell => `<td>${this._renderCell(cell)}</td>`).join('')}</tr>`;
             });
@@ -2110,7 +2320,7 @@
                                 : (title ? this._escapeHtml(title) : '-');
                             newRows.push([
                                 `${idx + 1}`,
-                                barName,
+                                this._forumSourceCell(el),
                                 this._htmlCell(titleCell),
                                 this._htmlCell((abs + ' ' + imgHtml).trim() || '-'),
                                 author,
@@ -2230,7 +2440,7 @@
                                 : (title ? this._escapeHtml(title) : '-');
                             newRows.push([
                                 `${idx + 1}`,
-                                barName,
+                                this._forumSourceCell(el),
                                 this._htmlCell(titleCell),
                                 this._htmlCell((abs + ' ' + imgHtml).trim() || '-'),
                                 author,
@@ -2838,7 +3048,7 @@
                             : (title ? this._escapeHtml(title) : '-');
                         rows.push([
                             `${i + 1}`,
-                            barName,
+                            this._forumSourceCell(el),
                             this._htmlCell(titleCell),
                             this._htmlCell((abs + ' ' + imgHtml).trim() || '-'),
                             author,
